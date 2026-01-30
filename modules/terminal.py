@@ -4,8 +4,9 @@ import os
 from pathlib import Path
 from pyrogram.enums import ParseMode
 
-# === Безопасность: определяем папку бота и запрещённые шаблоны ===
-BOT_DIR = Path(__file__).parent.resolve()
+# Предполагается, что этот файл лежит в папке modules/
+# Поэтому корень бота — на уровень выше
+BOT_DIR = Path(__file__).parent.parent.resolve()
 
 DANGEROUS_PATTERNS = {
     "rm -", "rmdir", "mv ", "dd ", "mkfs", "fdisk", "parted",
@@ -22,11 +23,8 @@ def is_dangerous(cmd: str) -> bool:
     for pattern in DANGEROUS_PATTERNS:
         if pattern in cmd_lower:
             return True
-    # Блокируем явные попытки выхода за пределы через ..
     if ".." in cmd_clean:
         return True
-    # В Termux абсолютные пути почти всегда не нужны в личном боте
-    # Разрешаем только пути внутри Termux (если очень нужно — можно ослабить)
     if cmd_clean.startswith("/") and not cmd_clean.startswith("/data/data/com.termux"):
         return True
     return False
@@ -47,14 +45,14 @@ async def term_cmd(client, message, args):
             "<emoji id=5219855643518212850>⚠️</emoji> <b>Запрещённая команда!</b>\n"
             "Команды, связанные с удалением, перемещением, форматированием\n"
             "или записью в системные области, отключены.",
-            parse_mode=ParseMode.HTML        )
-
+            parse_mode=ParseMode.HTML
+        )
     try:
         proc = await asyncio.create_subprocess_shell(
             cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=str(BOT_DIR)  # Запуск ТОЛЬКО из папки бота
+            cwd=str(BOT_DIR)
         )
 
         stdout, stderr = await proc.communicate()
@@ -96,9 +94,9 @@ async def eval_cmd(client, message, args):
     env = {
         'client': client,
         'message': message,
-        'args': args,        'reply': message.reply_to_message,
-        'print': lambda *a: a,
-        '__builtins__': __builtins__,
+        'args': args,
+        'reply': message.reply_to_message,
+        'print': lambda *a: a,        '__builtins__': __builtins__,
         'asyncio': asyncio,
         'event': message
     }
