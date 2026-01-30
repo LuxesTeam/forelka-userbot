@@ -1,6 +1,35 @@
 import sys
 import asyncio
+import os
+from pathlib import Path
 from pyrogram.enums import ParseMode
+
+# === Безопасность: определяем папку бота и запрещённые шаблоны ===
+BOT_DIR = Path(__file__).parent.resolve()
+
+DANGEROUS_PATTERNS = {
+    "rm -", "rmdir", "mv ", "dd ", "mkfs", "fdisk", "parted",
+    "chmod ", "chown ", "reboot", "shutdown", "halt", "poweroff",
+    ": >", ">/", "curl -O", "wget ", "nc ", "netcat ",
+    "busybox rm", "toybox rm", "rm *", "rm ."
+}
+
+def is_dangerous(cmd: str) -> bool:
+    cmd_clean = cmd.strip()
+    if not cmd_clean:
+        return False
+    cmd_lower = cmd_clean.lower()
+    for pattern in DANGEROUS_PATTERNS:
+        if pattern in cmd_lower:
+            return True
+    # Блокируем явные попытки выхода за пределы через ..
+    if ".." in cmd_clean:
+        return True
+    # В Termux абсолютные пути почти всегда не нужны в личном боте
+    # Разрешаем только пути внутри Termux (если очень нужно — можно ослабить)
+    if cmd_clean.startswith("/") and not cmd_clean.startswith("/data/data/com.termux"):
+        return True
+    return False
 
 async def term_cmd(client, message, args):
     pref = getattr(client, "prefix", ".")
@@ -13,30 +42,45 @@ async def term_cmd(client, message, args):
 
     cmd = " ".join(args)
 
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
+    if is_dangerous(cmd):
+        return await message.edit(
+            "<emoji id=5219855643518212850>⚠️</emoji> <b>Запрещённая команда!</b>\n"
+            "Команды, связанные с удалением, перемещением, форматированием\n"
+            "или записью в системные области, отключены.",
+            parse_mode=ParseMode.HTML        )
 
-    stdout, stderr = await proc.communicate()
-    out = (stdout or b"").decode(errors="ignore").strip()
-    err = (stderr or b"").decode(errors="ignore").strip()
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(BOT_DIR)  # Запуск ТОЛЬКО из папки бота
+        )
 
-    text = f"<b>$</b> <code>{cmd}</code>\n\n"
+        stdout, stderr = await proc.communicate()
+        out = (stdout or b"").decode(errors="ignore").strip()
+        err = (stderr or b"").decode(errors="ignore").strip()
 
-    if out:
-        text += f"<b>stdout:</b>\n<blockquote expandable><code>{out}</code></blockquote>\n\n"
-    if err:
-        text += f"<b>stderr:</b>\n<blockquote expandable><code>{err}</code></blockquote>\n\n"
+        text = f"<b>$</b> <code>{cmd}</code>\n\n"
 
-    text += f"<b>exit code:</b> <code>{proc.returncode}</code>"
+        if out:
+            text += f"<b>stdout:</b>\n<blockquote expandable><code>{out}</code></blockquote>\n\n"
+        if err:
+            text += f"<b>stderr:</b>\n<blockquote expandable><code>{err}</code></blockquote>\n\n"
 
-    if len(text) > 4000:
-        cut = 4000 - len("</code></blockquote>")
-        text = text[:cut] + "</code></blockquote>"
+        text += f"<b>exit code:</b> <code>{proc.returncode}</code>"
 
-    await message.edit(text, parse_mode=ParseMode.HTML)
+        if len(text) > 4000:
+            cut = 4000 - len("</code></blockquote>")
+            text = text[:cut] + "</code></blockquote>"
+
+        await message.edit(text, parse_mode=ParseMode.HTML)
+
+    except Exception as e:
+        await message.edit(
+            f"<emoji id=5219855643518212850>⚠️</emoji> <b>Ошибка запуска:</b>\n<code>{e}</code>",
+            parse_mode=ParseMode.HTML
+        )
 
 async def eval_cmd(client, message, args):
     """Выполнить Python код"""
@@ -49,37 +93,29 @@ async def eval_cmd(client, message, args):
 
     code = " ".join(args)
 
-    # Подготовим окружение для выполнения кода
     env = {
         'client': client,
         'message': message,
-        'args': args,
-        'reply': message.reply_to_message,
+        'args': args,        'reply': message.reply_to_message,
         'print': lambda *a: a,
         '__builtins__': __builtins__,
         'asyncio': asyncio,
-        'event': message  # Для совместимости с некоторыми скриптами
+        'event': message
     }
 
     try:
-        # Попробуем выполнить как выражение (return)
         try:
             result = eval(code, env)
             if asyncio.iscoroutine(result):
                 result = await result
             output = str(result)
         except SyntaxError:
-            # Если это не выражение, выполним как блок кода
-            # Создаем асинхронную функцию для выполнения кода
             exec_code = f"async def __temp_async_func(client, message):\n"
             for line in code.split('\n'):
                 exec_code += f"    {line}\n"
 
-            # Выполняем код, чтобы создать функцию
             exec(exec_code, env)
-            # Вызываем созданную функцию
             result = env['__temp_async_func'](client, message)
-            # Если результат - корутина, ждем её
             if asyncio.iscoroutine(result):
                 result = await result
             output = str(result) if result is not None else "None"
